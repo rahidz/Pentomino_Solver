@@ -75,8 +75,8 @@ class PentominoGUI(tk.Tk):
         self.solve_button.grid(row=2, column=0, pady=10, sticky="ew")
 
         self.clear_button = ttk.Button(control_frame,
-                                       text="Clear Board",
-                                       command=self.clear_board,
+                                       text="Clear Pieces",
+                                       command=self.clear_pieces,
                                        state=tk.DISABLED)
         self.clear_button.grid(row=3, column=0, pady=5, sticky="ew")
 
@@ -307,9 +307,25 @@ class PentominoGUI(tk.Tk):
         self.solve_button.config(state=tk.NORMAL)
         self.new_puzzle_button.config(state=tk.NORMAL)
 
-    def clear_board(self):
-        """Clears the editor board and any solution."""
-        self._reset_board_state()
+    def clear_pieces(self):
+        """Clears the solution from the board, but keeps the selected squares."""
+        # If there are no solutions, there's nothing to clear.
+        if not self.solutions:
+            return
+
+        self.solutions = []
+        self.current_solution_index = -1
+
+        # Redraw the board to show only the selected shape, not the pieces
+        self.draw_grid()
+
+        # Reset labels and buttons to pre-solve state
+        self.solution_label.config(text="Solution: - / -")
+        self.time_label.config(text="Time: -")
+        self.prev_button.config(state=tk.DISABLED)
+        self.next_button.config(state=tk.DISABLED)
+        self.solve_button.config(state=tk.NORMAL)
+        self.clear_button.config(state=tk.NORMAL)
 
     def new_puzzle(self):
         """Resets the GUI to its initial state to allow for a new puzzle."""
