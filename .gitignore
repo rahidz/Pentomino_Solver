@@ -1,0 +1,13 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Executable files
+*.exe
+
+# VS Code specific settings
+.vscode/
+
+# Any other image assets you don't want to track
+# For example, if pent2.jpg is just a reference image:
+pent2.jpg
