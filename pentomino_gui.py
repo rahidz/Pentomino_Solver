@@ -214,11 +214,17 @@ class PentominoGUI(tk.Tk):
         )
         self.solver_thread.start()
 
+    def _update_progress(self, count:int):
+        if self.max_solutions:                              # determinate
+            self.progressbar["value"] = count               # 0 … max_solutions
+            # Optional visual snappiness:
+            self.progressbar.update_idletasks()    
+
     def run_solver(self, stop_event):
         solver = PentominoSolver(self.board_shape, PENTOMINOES)
         # Progress callback to update progress bar
-        def progress_callback(count):
-            self.after(0, self.progressbar.step)
+        def progress_callback(count:int):
+            self.after(0, self._update_progress, count)
         solutions, time_taken = solver.solve(
             max_solutions=self.max_solutions,
             stop_event=stop_event,
@@ -228,14 +234,25 @@ class PentominoGUI(tk.Tk):
         self.after(0, self.on_solver_finished, solutions, time_taken, stop_event.is_set())
 
     def on_solver_finished(self, solutions, time_taken, was_cancelled):
-        # --- UI State Cleanup ---
-        self.progressbar.stop()
+    # --- Finalise the progress bar ---
+        if self.max_solutions:                 # determinate mode
+        # Fill the bar to either the max requested or the number actually found
+            self.progressbar.config(mode='determinate')
+            self.progressbar["value"] = min(len(solutions), self.max_solutions)
+        else:                                  # indeterminate mode
+            self.progressbar.stop()
+
+    # --- UI State Cleanup ---
         self.cancel_button.config(state=tk.DISABLED)
         self.clear_button.config(state=tk.NORMAL)
         self.new_puzzle_button.config(state=tk.NORMAL)
+
         if was_cancelled:
             self.solution_label.config(text="Cancelled")
-            messagebox.showinfo("Solver Cancelled", "The search was successfully cancelled.")
+            messagebox.showinfo(
+                "Solver Cancelled",
+                "The search was successfully cancelled."
+            )
         else:
             self.solutions = solutions
             if solutions:
@@ -245,7 +262,11 @@ class PentominoGUI(tk.Tk):
                 self.set_controls_state(tk.NORMAL)
             else:
                 self.solution_label.config(text="Solution: 0 / 0")
-                messagebox.showinfo("Solver Result", "No solutions found for this board shape.")
+                messagebox.showinfo(
+                    "Solver Result",
+                    "No solutions found for this board shape."
+                )
+
         self.time_label.config(text=f"Time: {time_taken:.4f}s")
 
     def cancel_solver(self):
