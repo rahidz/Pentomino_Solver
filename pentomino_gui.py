@@ -163,14 +163,18 @@ class PentominoGUI(tk.Tk):
 
     def update_count_label(self):
         """Updates the label showing the number of selected squares."""
-        self.count_label.config(text=f"Selected Squares: {len(self.active_cells)} / 60")
+        self.count_label.config(text=f"Selected Squares: {len(self.active_cells)}")
 
     def validate_and_solve(self):
-        if len(self.active_cells) != 60:
-            messagebox.showerror("Invalid Board Shape", 
-                                 f"The board must have exactly 60 active squares. You have selected {len(self.active_cells)}.")
+        num_cells = len(self.active_cells)
+        if num_cells < 5:
+            messagebox.showerror("Invalid Board Shape",
+                                 f"Please select at least 5 squares to place one pentomino.")
             return
-        
+        if num_cells > 60:
+            messagebox.showinfo("Board Information",
+                                f"You have selected {num_cells} squares. Only 12 pentominoes are available, so at most 60 squares will be filled.")
+
         max_sols = None
         if self.limit_solutions_var.get():
             try:
@@ -234,38 +238,40 @@ class PentominoGUI(tk.Tk):
         self.after(0, self.on_solver_finished, solutions, time_taken, stop_event.is_set())
 
     def on_solver_finished(self, solutions, time_taken, was_cancelled):
-    # --- Finalise the progress bar ---
+        # --- Finalise the progress bar ---
         if self.max_solutions:                 # determinate mode
-        # Fill the bar to either the max requested or the number actually found
+            # Fill the bar to either the max requested or the number actually found
             self.progressbar.config(mode='determinate')
             self.progressbar["value"] = min(len(solutions), self.max_solutions)
         else:                                  # indeterminate mode
             self.progressbar.stop()
 
-    # --- UI State Cleanup ---
+        # --- UI State Cleanup ---
         self.cancel_button.config(state=tk.DISABLED)
         self.clear_button.config(state=tk.NORMAL)
         self.new_puzzle_button.config(state=tk.NORMAL)
 
-        if was_cancelled:
-            self.solution_label.config(text="Cancelled")
-            messagebox.showinfo(
-                "Solver Cancelled",
-                "The search was successfully cancelled."
-            )
+        # --- Process solutions ---
+        self.solutions = solutions
+        if solutions:
+            self.current_solution_index = 0
+            self.draw_solution(solutions[0])
+            self.solution_label.config(text=f"Solution: 1 / {len(solutions)}")
+            self.set_controls_state(tk.NORMAL)
         else:
-            self.solutions = solutions
+            self.solution_label.config(text="Solution: 0 / 0")
+
+        # --- Display final message ---
+        if was_cancelled:
+            msg = "The search was cancelled."
             if solutions:
-                self.current_solution_index = 0
-                self.draw_solution(solutions[0])
-                self.solution_label.config(text=f"Solution: 1 / {len(solutions)}")
-                self.set_controls_state(tk.NORMAL)
-            else:
-                self.solution_label.config(text="Solution: 0 / 0")
-                messagebox.showinfo(
-                    "Solver Result",
-                    "No solutions found for this board shape."
-                )
+                msg += f"\n\nFound {len(solutions)} solution(s) before stopping."
+            messagebox.showinfo("Solver Cancelled", msg)
+        elif not solutions:
+            messagebox.showinfo(
+                "Solver Result",
+                "No solutions found for this board shape."
+            )
 
         self.time_label.config(text=f"Time: {time_taken:.4f}s")
 
@@ -328,11 +334,14 @@ class PentominoGUI(tk.Tk):
 
     def draw_solution(self, solution):
         self.draw_grid()
-        for piece_name, orientation, (r_start, c_start) in solution:
-            color = PIECE_COLORS.get(piece_name, "#000000")
-            for r_offset, c_offset in orientation:
-                r, c = r_start + r_offset, c_start + c_offset
-                self.canvas.itemconfig(f"cell_{r}_{c}", fill=color)
+        for item in solution:
+            # A placed piece is a tuple of (piece_name, orientation, start_pos)
+            if isinstance(item, tuple) and len(item) == 3:
+                piece_name, orientation, (r_start, c_start) = item
+                color = PIECE_COLORS.get(piece_name, "#000000")
+                for r_offset, c_offset in orientation:
+                    r, c = r_start + r_offset, c_start + c_offset
+                    self.canvas.itemconfig(f"cell_{r}_{c}", fill=color)
 
     def show_previous_solution(self):
         if not self.solutions: return

@@ -98,9 +98,12 @@ class PentominoSolver:
     def __init__(self, board: List[Tuple[int, int]], pentominoes=PENTOMINOES):
         self.board = board
         self.board_map = {pos: idx for idx, pos in enumerate(board)}
-        self.board_height = max(r for r, _ in board) + 1
-        self.board_width = max(c for _, c in board) + 1
+        self.board_height = max(r for r, _ in board) + 1 if board else 0
+        self.board_width = max(c for _, c in board) + 1 if board else 0
         self.pentominoes = pentominoes
+        self.num_pieces_to_use = min(12, len(self.board) // 5)
+        self.squares_to_leave_blank = len(self.board) - self.num_pieces_to_use * 5
+
         # Precompute orientations
         self.all_piece_orientations = {
             name: generate_orientations(shape)
@@ -109,30 +112,75 @@ class PentominoSolver:
 
     def _build_dlx_matrix(self, stop_event: Optional[threading.Event] = None):
         piece_names = sorted(self.pentominoes.keys())
-        col_names = piece_names + self.board
+        
+        # Columns for pieces that are NOT used
+        num_unused_pieces = len(piece_names) - self.num_pieces_to_use
+        unused_piece_cols = [f"unused_{i}" for i in range(num_unused_pieces)]
+        
+        # Columns for squares that are left blank
+        blank_square_cols = [f"blank_{i}" for i in range(self.squares_to_leave_blank)]
+        
+        col_names = piece_names + unused_piece_cols + self.board + blank_square_cols
         matrix = []
-        iteration_count = 0
+
+        # --- Rows for placing a pentomino ---
         for piece_name in piece_names:
             for orientation in self.all_piece_orientations[piece_name]:
                 for r_start, c_start in self.board:
-                    # Immediate cancellation check
-                    if stop_event and stop_event.is_set():
-                        return None, None
-                    iteration_count += 1
-
+                    if stop_event and stop_event.is_set(): return None, None
+                    
                     new_pos = [(r_start + r, c_start + c) for r, c in orientation]
                     if all(pos in self.board_map for pos in new_pos):
                         row = [0] * len(col_names)
+                        # Mark the piece as used
                         row[piece_names.index(piece_name)] = 1
+                        # Mark the board squares as covered
                         for pos in new_pos:
-                            row[len(piece_names) + self.board_map[pos]] = 1
+                            row[len(piece_names) + num_unused_pieces + self.board_map[pos]] = 1
                         matrix.append(((piece_name, orientation, (r_start, c_start)), row))
+
+        # --- Rows for leaving a piece unused ---
+        for i, piece_name in enumerate(piece_names):
+            for j in range(num_unused_pieces):
+                row = [0] * len(col_names)
+                # Mark the piece as used (in the main piece columns)
+                row[i] = 1
+                # Mark one of the "unused" slot columns
+                row[len(piece_names) + j] = 1
+                matrix.append(((f"skip_{piece_name}", j), row))
+
+        # --- Rows for leaving a square blank ---
+        for i, pos in enumerate(self.board):
+            for j in range(self.squares_to_leave_blank):
+                row = [0] * len(col_names)
+                # Mark the board square as covered
+                row[len(piece_names) + num_unused_pieces + i] = 1
+                # Mark one of the "blank" slot columns
+                row[len(piece_names) + num_unused_pieces + len(self.board) + j] = 1
+                matrix.append(((f"blank_{pos}", j), row))
+
         return col_names, matrix
 
     def _build_dlx_links(self, col_names, matrix, stop_event: Optional[threading.Event] = None):
         self.root = Column("root")
+        
+        # Create columns, including secondary ones for unused pieces/blank squares
         columns = [Column(name) for name in col_names]
-        # link header <-> columns in a ring
+        
+        # Primary columns are pieces and board squares
+        num_primary_cols = len(self.pentominoes) + len(self.board)
+        
+        # Link only primary columns in the root ring initially
+        self.root.R = columns[0]
+        self.root.L = columns[num_primary_cols - 1]
+        columns[0].L = self.root
+        columns[num_primary_cols - 1].R = self.root
+
+        for i in range(num_primary_cols - 1):
+            columns[i].R = columns[i+1]
+            columns[i+1].L = columns[i]
+
+        # Link header <-> columns in a ring
         for i in range(len(columns)):
             columns[i].L = columns[i-1]
             columns[i].R = columns[(i+1) % len(columns)]
@@ -171,11 +219,14 @@ class PentominoSolver:
 
     def _solution_to_grid(self, solution):
         grid = [[' ' for _ in range(self.board_width)] for _ in range(self.board_height)]
-        for piece_name, orientation, (r_start, c_start) in solution:
-            for r_offset, c_offset in orientation:
-                r, c = r_start + r_offset, c_start + c_offset
-                if 0 <= r < self.board_height and 0 <= c < self.board_width:
-                    grid[r][c] = piece_name
+        for item in solution:
+            # We only care about placed pieces for drawing
+            if isinstance(item, tuple) and len(item) == 3:
+                piece_name, orientation, (r_start, c_start) = item
+                for r_offset, c_offset in orientation:
+                    r, c = r_start + r_offset, c_start + c_offset
+                    if 0 <= r < self.board_height and 0 <= c < self.board_width:
+                        grid[r][c] = piece_name
         return tuple("".join(row) for row in grid)
 
     def _get_canonical_solution(self, solution):
