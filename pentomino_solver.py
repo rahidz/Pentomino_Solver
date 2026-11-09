@@ -1,8 +1,8 @@
-import time
-import threading
-from typing import List, Tuple, Set, Optional, Any, cast
+"""Pentomino packing with sparse Algorithm X / Dancing Links."""
 
-# --- 1. Pentomino and Board Definitions ---
+import threading
+import time
+
 
 PENTOMINOES = {
     'F': [(0, 1), (0, 2), (1, 0), (1, 1), (2, 1)],
@@ -15,329 +15,307 @@ PENTOMINOES = {
     'V': [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2)],
     'W': [(0, 0), (1, 0), (1, 1), (2, 1), (2, 2)],
     'X': [(0, 1), (1, 0), (1, 1), (1, 2), (2, 1)],
-    'Y': [(0, 1), (1, 1), (2, 1), (3, 1), (3, 0)],
-    'Z': [(0, 0), (0, 1), (1, 1), (1, 2), (1, 3)]
+    'Y': [(0, 1), (1, 0), (1, 1), (2, 1), (3, 1)],
+    'Z': [(0, 0), (0, 1), (1, 1), (2, 1), (2, 2)],
 }
 
-def generate_orientations(piece: List[Tuple[int, int]]) -> Set[Tuple[Tuple[int, int], ...]]:
-    def normalize(p):
-        min_r = min(r for r, c in p)
-        min_c = min(c for r, c in p)
-        return tuple(sorted([(r - min_r, c - min_c) for r, c in p]))
-    def rotate_90(p):
-        return [(-c, r) for r, c in p]
-    def flip(p):
-        return [(-r, c) for r, c in p]
 
-    orientations: Set[Tuple[Tuple[int, int], ...]] = set()
-    p1 = list(piece)
-    for _ in range(2):  # two flip states
-        p2 = p1[:]
-        for _ in range(4):  # four rotations
-            orientations.add(normalize(p2))
-            p2 = rotate_90(p2)
-        p1 = flip(p1)
+def generate_orientations(piece):
+    orientations = set()
+    for reflected in (False, True):
+        cells = [(r, -c if reflected else c) for r, c in piece]
+        for _ in range(4):
+            min_r = min(r for r, c in cells)
+            min_c = min(c for r, c in cells)
+            orientations.add(tuple(sorted((r - min_r, c - min_c) for r, c in cells)))
+            cells = [(-c, r) for r, c in cells]
     return orientations
 
-def generate_board_shape() -> List[Tuple[int, int]]:
-    """
-    Customize this to your board shape; by default, generates a 6×10 rectangle.
-    """
-    shape = []
-    for r in range(6):
-        for c in range(10):
-            shape.append((r, c))
-    return shape
 
-# --- DLX Node and Column Classes ---
+def generate_board_shape():
+    return [(r, c) for r in range(6) for c in range(10)]
+
 
 class Node:
-    def __init__(self, col: 'Column', row_id: Any = None):
-        self.L: 'Node' = self
-        self.R: 'Node' = self
-        self.U: 'Node' = self
-        self.D: 'Node' = self
-        self.col: 'Column' = col
-        self.row_id: Any = row_id
+    __slots__ = ('L', 'R', 'U', 'D', 'col', 'row_id')
+
+    def __init__(self, col, row_id=None):
+        self.L = self.R = self.U = self.D = self
+        self.col = col
+        self.row_id = row_id
+
 
 class Column(Node):
-    def __init__(self, name):
-        super().__init__(self)
-        self.name = name
-        self.size = 0  # count of nodes in this column
+    __slots__ = ('size', 'is_board')
 
-def cover(col: Column):
+    def __init__(self, is_board=False):
+        super().__init__(self)
+        self.size = 0
+        self.is_board = is_board
+
+
+def cover(col):
     col.R.L = col.L
     col.L.R = col.R
-    i = col.D
-    while i != col:
-        j = i.R
-        while j != i:
-            j.D.U = j.U
-            j.U.D = j.D
-            j.col.size -= 1
-            j = j.R
-        i = i.D
+    row = col.D
+    while row is not col:
+        node = row.R
+        while node is not row:
+            node.D.U = node.U
+            node.U.D = node.D
+            node.col.size -= 1
+            node = node.R
+        row = row.D
 
-def uncover(col: Column):
-    i = col.U
-    while i != col:
-        j = i.L
-        while j != i:
-            j.col.size += 1
-            j.D.U = j
-            j.U.D = j
-            j = j.L
-        i = i.U
+
+def uncover(col):
+    row = col.U
+    while row is not col:
+        node = row.L
+        while node is not row:
+            node.col.size += 1
+            node.D.U = node
+            node.U.D = node
+            node = node.L
+        row = row.U
     col.R.L = col
     col.L.R = col
 
-# --- 4. Pentomino Solver Class (with progress and immediate cancel) ---
 
 class PentominoSolver:
-    def __init__(self, board: List[Tuple[int, int]], pentominoes=PENTOMINOES):
-        self.board = board
-        self.board_map = {pos: idx for idx, pos in enumerate(board)}
-        self.board_height = max(r for r, _ in board) + 1 if board else 0
-        self.board_width = max(c for _, c in board) + 1 if board else 0
-        self.pentominoes = pentominoes
-        self.num_pieces_to_use = min(12, len(self.board) // 5)
-        self.squares_to_leave_blank = len(self.board) - self.num_pieces_to_use * 5
+    """Use each piece at most once, filling min(piece count, area // 5) pieces.
 
-        # Precompute orientations
+    Solutions are lists of (piece name, orientation, origin) placements in the
+    input board's coordinates. Rotations/reflections preserving the board count
+    once. Uncovered cells are allowed only for the area left after that target.
+    """
+
+    def __init__(self, board, pentominoes=PENTOMINOES):
+        self.board = sorted(board)
+        if not self.board or len(set(self.board)) != len(self.board):
+            raise ValueError('The board must contain distinct cells and cannot be empty.')
+        if not pentominoes or any(len(p) != 5 or len(set(p)) != 5 for p in pentominoes.values()):
+            raise ValueError('Each pentomino must contain five distinct cells.')
+        for shape in pentominoes.values():
+            connected = {shape[0]}
+            while True:
+                expanded = connected | {
+                    cell for cell in shape
+                    if any((cell[0] + dr, cell[1] + dc) in connected
+                           for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)))
+                }
+                if expanded == connected:
+                    break
+                connected = expanded
+            if len(connected) != 5:
+                raise ValueError('Pentomino cells must be edge-connected.')
+
+        self.board_map = {cell: i for i, cell in enumerate(self.board)}
+        self.min_r = min(r for r, c in self.board)
+        self.min_c = min(c for r, c in self.board)
+        self.board_height = max(r for r, c in self.board) - self.min_r + 1
+        self.board_width = max(c for r, c in self.board) - self.min_c + 1
+        self.stride = self.board_width + 1  # Empty gutter prevents horizontal wrapping.
+        self.cell_bits = {
+            (r, c): 1 << ((r - self.min_r) * self.stride + c - self.min_c)
+            for r, c in self.board
+        }
+        self.board_mask = sum(self.cell_bits.values())
+        self.pentominoes = pentominoes
+        self.num_pieces_to_use = min(len(pentominoes), len(self.board) // 5)
+        self.squares_to_leave_blank = len(self.board) - self.num_pieces_to_use * 5
         self.all_piece_orientations = {
-            name: generate_orientations(shape)
+            name: sorted(generate_orientations(shape))
             for name, shape in pentominoes.items()
         }
+        self.symmetries = self._board_symmetries()
 
-    def _build_dlx_matrix(self, stop_event: Optional[threading.Event] = None):
-        piece_names = sorted(self.pentominoes.keys())
-        
-        # Columns for pieces that are NOT used
-        num_unused_pieces = len(piece_names) - self.num_pieces_to_use
-        unused_piece_cols = [f"unused_{i}" for i in range(num_unused_pieces)]
-        
-        # Columns for squares that are left blank
-        blank_square_cols = [f"blank_{i}" for i in range(self.squares_to_leave_blank)]
-        
-        col_names = piece_names + unused_piece_cols + self.board + blank_square_cols
-        matrix = []
+    def _board_symmetries(self):
+        permutations = set()
+        for reflected in (False, True):
+            cells = [(r, -c if reflected else c) for r, c in self.board]
+            for _ in range(4):
+                min_r = min(r for r, c in cells)
+                min_c = min(c for r, c in cells)
+                transformed = [(r - min_r + self.min_r, c - min_c + self.min_c)
+                               for r, c in cells]
+                if set(transformed) == set(self.board):
+                    permutations.add(tuple(self.board_map[cell] for cell in transformed))
+                cells = [(-c, r) for r, c in cells]
+        return sorted(permutations)
 
-        # --- Rows for placing a pentomino ---
-        for piece_name in piece_names:
-            for orientation in self.all_piece_orientations[piece_name]:
-                for r_start, c_start in self.board:
-                    if stop_event and stop_event.is_set(): return None, None
-                    
-                    new_pos = [(r_start + r, c_start + c) for r, c in orientation]
-                    if all(pos in self.board_map for pos in new_pos):
-                        row = [0] * len(col_names)
-                        # Mark the piece as used
-                        row[piece_names.index(piece_name)] = 1
-                        # Mark the board squares as covered
-                        for pos in new_pos:
-                            row[len(piece_names) + num_unused_pieces + self.board_map[pos]] = 1
-                        matrix.append(((piece_name, orientation, (r_start, c_start)), row))
+    def _build_links(self):
+        self.root = Column()
+        pieces = {name: Column() for name in sorted(self.pentominoes)}
+        cells = {cell: Column(is_board=True) for cell in self.board}
+        primary = list(cells.values())
+        all_required = self.num_pieces_to_use == len(pieces)
+        if all_required:
+            primary += list(pieces.values())
+        # Optional piece columns remain outside the root ring: at most one use.
+        for col in primary:
+            col.L, col.R = self.root.L, self.root
+            self.root.L.R = col
+            self.root.L = col
 
-        # --- Rows for leaving a piece unused ---
-        for i, piece_name in enumerate(piece_names):
-            for j in range(num_unused_pieces):
-                row = [0] * len(col_names)
-                # Mark the piece as used (in the main piece columns)
-                row[i] = 1
-                # Mark one of the "unused" slot columns
-                row[len(piece_names) + j] = 1
-                matrix.append(((f"skip_{piece_name}", j), row))
+        self.rows = []
 
-        # --- Rows for leaving a square blank ---
-        for i, pos in enumerate(self.board):
-            for j in range(self.squares_to_leave_blank):
-                row = [0] * len(col_names)
-                # Mark the board square as covered
-                row[len(piece_names) + num_unused_pieces + i] = 1
-                # Mark one of the "blank" slot columns
-                row[len(piece_names) + num_unused_pieces + len(self.board) + j] = 1
-                matrix.append(((f"blank_{pos}", j), row))
+        def add_row(info, mask, columns):
+            row_id = len(self.rows)
+            self.rows.append((info, mask))
+            first = None
+            for col in columns:
+                node = Node(col, row_id)
+                node.U, node.D = col.U, col
+                col.U.D = node
+                col.U = node
+                col.size += 1
+                if first is None:
+                    first = node
+                else:
+                    node.L, node.R = first.L, first
+                    first.L.R = node
+                    first.L = node
 
-        return col_names, matrix
+        # Fix one required piece to one representative per board-symmetry orbit.
+        fixed_piece = min(pieces, key=lambda p: len(self.all_piece_orientations[p])) if all_required else None
+        for name, piece_col in pieces.items():
+            for orientation in self.all_piece_orientations[name]:
+                # Anchor an occupied cell, not the possibly empty bounding-box corner.
+                anchor_r, anchor_c = orientation[0]
+                for r, c in self.board:
+                    if self.stop_event.is_set():
+                        return
+                    origin = (r - anchor_r, c - anchor_c)
+                    positions = [(origin[0] + dr, origin[1] + dc) for dr, dc in orientation]
+                    if not all(pos in cells for pos in positions):
+                        continue
+                    indices = tuple(sorted(self.board_map[pos] for pos in positions))
+                    if name == fixed_piece and any(
+                        tuple(sorted(sym[i] for i in indices)) < indices for sym in self.symmetries
+                    ):
+                        continue
+                    add_row((name, orientation, origin),
+                            sum(self.cell_bits[pos] for pos in positions),
+                            [piece_col] + [cells[pos] for pos in positions])
 
-    def _build_dlx_links(self, col_names, matrix, stop_event: Optional[threading.Event] = None):
-        self.root = Column("root")
-        
-        # Create columns, including secondary ones for unused pieces/blank squares
-        columns = [Column(name) for name in col_names]
-        
-        # Primary columns are pieces and board squares
-        num_primary_cols = len(self.pentominoes) + len(self.board)
-        
-        # Link only primary columns in the root ring initially
-        self.root.R = columns[0]
-        self.root.L = columns[num_primary_cols - 1]
-        columns[0].L = self.root
-        columns[num_primary_cols - 1].R = self.root
+        # One blank row per cell, not factorially many labeled blank/unused slots.
+        if self.squares_to_leave_blank:
+            for pos, col in cells.items():
+                add_row(None, self.cell_bits[pos], [col])
 
-        for i in range(num_primary_cols - 1):
-            columns[i].R = columns[i+1]
-            columns[i+1].L = columns[i]
+    def _components_fit(self, remaining, blanks):
+        """Each disconnected component needs at least area % 5 blank cells."""
+        needed = 0
+        while remaining:
+            component = remaining & -remaining
+            while True:
+                expanded = component | ((component << 1 | component >> 1 |
+                                          component << self.stride | component >> self.stride) & remaining)
+                if expanded == component:
+                    break
+                component = expanded
+            needed += component.bit_count() % 5
+            if needed > blanks:
+                return False
+            remaining ^= component
+        return True
 
-        # Link header <-> columns in a ring
-        for i in range(len(columns)):
-            columns[i].L = columns[i-1]
-            columns[i].R = columns[(i+1) % len(columns)]
-        self.root.R = columns[0]
-        self.root.L = columns[-1]
-        columns[0].L = self.root
-        columns[-1].R = self.root
+    def _add_solution(self, placements):
+        labels = [''] * len(self.board)
+        for name, orientation, (r, c) in placements:
+            for dr, dc in orientation:
+                labels[self.board_map[r + dr, c + dc]] = name
+        forms = []
+        for sym in self.symmetries:
+            transformed = [''] * len(labels)
+            for source, dest in enumerate(sym):
+                transformed[dest] = labels[source]
+            forms.append(tuple(transformed))
+        canonical = min(forms)
+        if canonical not in self.canonical_solutions:
+            self.canonical_solutions.add(canonical)
+            self.solutions.append(list(placements))
+            if self.progress_callback:
+                self.progress_callback(len(self.solutions))
 
-        # create nodes
-        for row_idx, (row_info, row_data) in enumerate(matrix):
-            # Immediate cancellation check
-            if stop_event and stop_event.is_set():
-                self.root = None
-                return
-            last_node = None
-            for col_idx, cell in enumerate(row_data):
-                if cell:
-                    col = columns[col_idx]
-                    new_node = Node(col, row_id=row_info)
-                    # vertical link
-                    new_node.D = col
-                    new_node.U = col.U
-                    col.U.D = new_node
-                    col.U = new_node
-                    col.size += 1
-                    # horizontal link
-                    if last_node:
-                        new_node.L = last_node
-                        new_node.R = last_node.R
-                        last_node.R.L = new_node
-                        last_node.R = new_node
-                    else:
-                        new_node.L = new_node
-                        new_node.R = new_node
-                    last_node = new_node
-
-    def _solution_to_grid(self, solution):
-        grid = [[' ' for _ in range(self.board_width)] for _ in range(self.board_height)]
-        for item in solution:
-            # We only care about placed pieces for drawing
-            if isinstance(item, tuple) and len(item) == 3:
-                piece_name, orientation, (r_start, c_start) = item
-                for r_offset, c_offset in orientation:
-                    r, c = r_start + r_offset, c_start + c_offset
-                    if 0 <= r < self.board_height and 0 <= c < self.board_width:
-                        grid[r][c] = piece_name
-        return tuple("".join(row) for row in grid)
-
-    def _get_canonical_solution(self, solution):
-        grid = self._solution_to_grid(solution)
-        # For a rectangle, the symmetries are identity, horizontal flip,
-        # vertical flip, and 180-degree rotation.
-        forms = {grid}
-        # Horizontal flip
-        h_flipped = tuple(row[::-1] for row in grid)
-        forms.add(h_flipped)
-        # Vertical flip
-        v_flipped = tuple(grid[len(grid) - 1 - r] for r in range(len(grid)))
-        forms.add(v_flipped)
-        # 180-degree rotation (h_flip of v_flip)
-        rotated_180 = tuple(row[::-1] for row in v_flipped)
-        forms.add(rotated_180)
-        return min(forms)
-
-    def _add_solution(self, solution):
-        canonical_form = self._get_canonical_solution(solution)
-        if canonical_form not in self.canonical_solutions:
-            self.canonical_solutions.add(canonical_form)
-            self.solutions.append(solution)
-
-    def solve(self,
-              max_solutions: Optional[int] = None,
-              stop_event: Optional[threading.Event] = None,
-              progress_callback=None):
-        """
-        Initializes DLX and starts the search.
-        Returns (solutions, time_taken).
-        """
+    def solve(self, max_solutions=None, stop_event=None, progress_callback=None):
+        """Return (unique solutions, elapsed seconds); None means no result limit."""
+        if max_solutions is not None and (not isinstance(max_solutions, int) or max_solutions < 1):
+            raise ValueError('max_solutions must be a positive integer or None.')
+        started = time.perf_counter()
         self.solutions = []
         self.canonical_solutions = set()
-        start_time = time.time()
+        self.nodes_searched = 0
+        self.max_solutions = max_solutions
+        self.stop_event = stop_event if stop_event is not None else threading.Event()
+        self.progress_callback = progress_callback
+        if not self.stop_event.is_set() and self._components_fit(self.board_mask, self.squares_to_leave_blank):
+            self._build_links()
+            if not self.stop_event.is_set():
+                self._search([], self.board_mask, self.squares_to_leave_blank)
+        return self.solutions, time.perf_counter() - started
 
-        # Build matrix
-        col_names, matrix = self._build_dlx_matrix(stop_event)
-        if matrix is None:
-            return self.solutions, time.time() - start_time
+    def _search(self, placements, remaining, blanks):
+        if self.stop_event.is_set():
+            return True
+        self.nodes_searched += 1
+        if len(placements) == self.num_pieces_to_use:
+            self._add_solution(placements)
+            return self.max_solutions is not None and len(self.solutions) >= self.max_solutions
+        if not self._components_fit(remaining, blanks):
+            return False
 
-        # Link nodes
-        self._build_dlx_links(col_names, matrix, stop_event)
-        # Search
-        self._search([], max_solutions, stop_event, progress_callback)
+        col = self.root.R
+        best = None
+        smallest = float('inf')
+        while col is not self.root:
+            size = col.size - (col.is_board and not blanks and bool(self.squares_to_leave_blank))
+            if size < smallest:
+                best, smallest = col, size
+                if size <= 1:
+                    break
+            col = col.R
+        if smallest == 0:
+            return False
 
-        return self.solutions, time.time() - start_time
+        cover(best)
+        row = best.D
+        halted = False
+        while row is not best:
+            info, mask = self.rows[row.row_id]
+            if info is not None or blanks:
+                if info is not None:
+                    placements.append(info)
+                node = row.R
+                while node is not row:
+                    cover(node.col)
+                    node = node.R
+                halted = self._search(placements, remaining ^ mask, blanks - (info is None))
+                node = row.L
+                while node is not row:
+                    uncover(node.col)
+                    node = node.L
+                if info is not None:
+                    placements.pop()
+                if halted:
+                    break
+            row = row.D
+        uncover(best)
+        return halted
 
-    def _search(self,
-                partial_solution: List,
-                max_solutions: Optional[int],
-                stop_event: Optional[threading.Event],
-                progress_callback=None):
-        # Immediate cancellation check
-        if stop_event and stop_event.is_set():
-            return
-        if self.root is None:
-            return
-        if max_solutions is not None and len(self.solutions) >= max_solutions:
-            return
-
-        # Solution found?
-        if self.root.R == self.root:
-            self._add_solution(list(partial_solution))
-            if progress_callback:
-                progress_callback(len(self.solutions))
-            return
-
-        # Choose column with fewest nodes using Knuth's Algorithm S heuristic.
-        # We use cast because the type checker can't infer that the nodes in the
-        # root's circular list are all Column objects.
-        c = cast(Column, self.root.R)
-        j = cast(Column, c.R)
-        while j != self.root:
-            if j.size < c.size:
-                c = j
-            j = cast(Column, j.R)
-
-        # Cover
-        cover(c)
-        r = c.D
-        while r != c:
-            partial_solution.append(r.row_id)
-            j = r.R
-            while j != r:
-                cover(j.col)
-                j = j.R
-
-            # Recurse
-            self._search(partial_solution, max_solutions, stop_event, progress_callback)
-
-            # Backtrack
-            j = r.L
-            while j != r:
-                uncover(j.col)
-                j = j.L
-            partial_solution.pop()
-            r = r.D
-        uncover(c)
-
-
-# --- 5. Main Execution (for standalone testing) ---
 
 def main():
-    print("Setting up the puzzle...")
-    board = generate_board_shape()
-    solver = PentominoSolver(board, PENTOMINOES)
+    solver = PentominoSolver(generate_board_shape())
+    solutions, elapsed = solver.solve(max_solutions=1)
+    print(f'{len(solutions)} solution in {elapsed:.3f}s ({solver.nodes_searched:,} search nodes)')
+    if solutions:
+        grid = [['.' for c in range(10)] for r in range(6)]
+        for name, orientation, (r, c) in solutions[0]:
+            for dr, dc in orientation:
+                grid[r + dr][c + dc] = name
+        print('\n'.join(' '.join(row) for row in grid))
 
-    print("Starting search for solutions...")
-    solutions, t = solver.solve(max_solutions=1)
-    print(f"Found {len(solutions)} unique solutions in {t:.2f} seconds.")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
